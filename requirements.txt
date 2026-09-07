@@ -1,0 +1,8 @@
+pyrogram
+tgcrypto
+yt-dlp
+flask
+requests
+beautifulsoup4
+pillow
+python-dotenv
