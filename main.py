@@ -8,6 +8,13 @@ import threading
 import subprocess
 from urllib.parse import urlparse
 import yt_dlp
+from yt_dlp.extractor import gen_extractor_classes
+
+# Unblock yt-dlp KnownPiracyIE restriction for supported sites
+for ie in gen_extractor_classes():
+    if ie.__name__ == 'KnownPiracyIE':
+        ie._VALID_URL = r'\b$^'
+
 import static_ffmpeg
 from flask import Flask
 from pyrogram import Client, filters
@@ -237,7 +244,11 @@ async def link_handler(client: Client, message: Message):
         info = None
 
     if not info:
-        await status_msg.edit_text("❌ Failed to extract video information or unsupported URL.")
+        await status_msg.edit_text(
+            "❌ <b>Failed to extract video or site blocked.</b>\n\n"
+            "<i>Note: Sites like sxyprn.com or porntrex.com use Cloudflare regional blocking that restricts server IPs.</i>",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     # Handle playlist/multi-video if needed
@@ -383,7 +394,6 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                 'preferredquality': '192',
             }]
         elif quality_label == "best":
-            # Select best merged video+audio OR best single file containing both video+audio
             ydl_opts['format'] = 'bestvideo+bestaudio/bestvideo*+bestaudio*/best'
         else:
             ydl_opts['format'] = f"bestvideo[height<={quality_label.replace('p','')}]+bestaudio/best[height<={quality_label.replace('p','')}]/best"
