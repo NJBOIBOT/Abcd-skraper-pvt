@@ -5,13 +5,29 @@ import shutil
 import logging
 import asyncio
 import threading
+import subprocess
 from urllib.parse import urlparse
 import yt_dlp
+import static_ffmpeg
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from dotenv import load_dotenv
+
+# Initialize static ffmpeg binaries so ffmpeg and ffprobe are available in PATH
+try:
+    static_ffmpeg.add_paths()
+except Exception as e:
+    logging.warning(f"Failed to add static_ffmpeg paths: {e}")
+
+# Try importing hachoir metadata parser for video metadata (width, height, duration)
+try:
+    from hachoir.metadata import extractMetadata
+    from hachoir.parser import createParser
+    HACHOIR_AVAILABLE = True
+except ImportError:
+    HACHOIR_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -113,6 +129,42 @@ async def progress_callback(current, total, message: Message, task_id: str, acti
         pass
 
 
+def get_video_metadata(file_path):
+    """Extract width, height, and duration from video file using hachoir."""
+    width, height, duration = 0, 0, 0
+    if HACHOIR_AVAILABLE:
+        try:
+            parser = createParser(file_path)
+            if parser:
+                with parser:
+                    metadata = extractMetadata(parser)
+                    if metadata:
+                        if metadata.has("duration"):
+                            duration = metadata.get("duration").seconds
+                        if metadata.has("width"):
+                            width = metadata.get("width")
+                        if metadata.has("height"):
+                            height = metadata.get("height")
+        except Exception as e:
+            logger.warning(f"Failed to extract video metadata: {e}")
+    return width, height, duration
+
+
+def generate_thumbnail(video_path, output_thumb_path):
+    """Generate video thumbnail using ffmpeg."""
+    try:
+        cmd = [
+            'ffmpeg', '-y', '-ss', '00:00:01', '-i', video_path,
+            '-vframes', '1', '-q:v', '2', output_thumb_path
+        ]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        if os.path.exists(output_thumb_path):
+            return output_thumb_path
+    except Exception as e:
+        logger.warning(f"Thumbnail generation failed: {e}")
+    return None
+
+
 def get_ytdl_opts(custom_headers=None):
     """Return standard yt-dlp options."""
     opts = {
@@ -121,6 +173,7 @@ def get_ytdl_opts(custom_headers=None):
         'concurrent_fragment_downloads': 4,
         'nocheckcertificate': True,
         'ignoreerrors': True,
+        'writethumbnail': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     if custom_headers:
@@ -330,7 +383,8 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                 'preferredquality': '192',
             }]
         elif quality_label == "best":
-            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+            # Select best merged video+audio OR best single file containing both video+audio
+            ydl_opts['format'] = 'bestvideo+bestaudio/bestvideo*+bestaudio*/best'
         else:
             ydl_opts['format'] = f"bestvideo[height<={quality_label.replace('p','')}]+bestaudio/best[height<={quality_label.replace('p','')}]/best"
 
@@ -360,7 +414,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
 
         if not os.path.exists(downloaded_file):
             # Check for matching files in DOWNLOAD_DIR
-            matching_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.startswith(out_filename)]
+            matching_files = [os.path.join(DOWNLOAD_DIR, f) for f in os.listdir(DOWNLOAD_DIR) if f.startswith(out_filename) and not f.endswith(('.jpg', '.webp', '.png'))]
             if matching_files:
                 downloaded_file = matching_files[0]
                 task["file_path"] = downloaded_file
@@ -385,13 +439,20 @@ async def callback_handler(client: Client, callback: CallbackQuery):
 
         await callback.message.edit_text("🚀 <i>Starting upload to Telegram...</i>", reply_markup=cancel_btn, parse_mode=ParseMode.HTML)
 
+        # Extract video metadata and generate thumbnail
+        width, height, meta_duration = get_video_metadata(downloaded_file)
+        final_duration = meta_duration if meta_duration > 0 else int(duration)
+
+        thumb_file = os.path.join(DOWNLOAD_DIR, f"{out_filename}_thumb.jpg")
+        generated_thumb = generate_thumbnail(downloaded_file, thumb_file)
+
         try:
             if quality_label == "audio" or downloaded_file.endswith(".mp3"):
                 await client.send_audio(
                     chat_id=callback.message.chat.id,
                     audio=downloaded_file,
                     caption=f"🎵 <b>{title}</b>",
-                    duration=int(duration),
+                    duration=final_duration,
                     progress=progress_callback,
                     progress_args=(callback.message, task_id, "Uploading Audio", last_update_time),
                     parse_mode=ParseMode.HTML
@@ -401,7 +462,10 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                     chat_id=callback.message.chat.id,
                     video=downloaded_file,
                     caption=f"🎬 <b>{title}</b>\n✨ Quality: {quality_label}",
-                    duration=int(duration),
+                    duration=final_duration,
+                    width=width,
+                    height=height,
+                    thumb=generated_thumb,
                     supports_streaming=True,
                     progress=progress_callback,
                     progress_args=(callback.message, task_id, "Uploading Video", last_update_time),
@@ -414,10 +478,15 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                 logger.error(f"Upload error: {e}")
                 await callback.message.edit_text(f"❌ <b>Upload Failed:</b> {str(e)[:200]}", parse_mode=ParseMode.HTML)
         finally:
-            # Cleanup downloaded file from disk
+            # Cleanup downloaded video and thumbnail files from disk
             if os.path.exists(downloaded_file):
                 try:
                     os.remove(downloaded_file)
+                except Exception:
+                    pass
+            if generated_thumb and os.path.exists(generated_thumb):
+                try:
+                    os.remove(generated_thumb)
                 except Exception:
                     pass
             active_tasks.pop(task_id, None)
