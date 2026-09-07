@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import yt_dlp
 from flask import Flask
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
 from dotenv import load_dotenv
 
@@ -43,8 +44,14 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # Structure: task_id -> {"url": str, "title": str, "cancelled": bool, "status": str, "file_path": str, "msg": Message}
 active_tasks = {}
 
-# Start Pyrogram Client
-app = Client("video_downloader_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Start Pyrogram Client with parse_mode set to HTML by default
+app = Client(
+    "video_downloader_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
 
 # ==================== Helper Functions ====================
 
@@ -101,7 +108,7 @@ async def progress_callback(current, total, message: Message, task_id: str, acti
     ])
 
     try:
-        await message.edit_text(text, reply_markup=cancel_btn, parse_mode="html")
+        await message.edit_text(text, reply_markup=cancel_btn, parse_mode=ParseMode.HTML)
     except Exception:
         pass
 
@@ -134,7 +141,7 @@ async def start_command(client: Client, message: Message):
         "<b>How to use:</b>\n"
         "Just send or forward any video URL directly in this chat!"
     )
-    await message.reply_text(welcome_text, parse_mode="html")
+    await message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
 
 @app.on_message(filters.command("help") & filters.private)
@@ -146,7 +153,7 @@ async def help_command(client: Client, message: Message):
         "3. The bot will download and upload the video directly to Telegram.\n"
         "4. Click <b>❌ Cancel Task</b> anytime to stop the process."
     )
-    await message.reply_text(help_text, parse_mode="html")
+    await message.reply_text(help_text, parse_mode=ParseMode.HTML)
 
 
 # ==================== Link Processing ====================
@@ -159,7 +166,7 @@ async def link_handler(client: Client, message: Message):
         await message.reply_text("⚠️ Please send a valid video URL starting with http:// or https://")
         return
 
-    status_msg = await message.reply_text("🔍 <i>Extracting video information... Please wait.</i>", parse_mode="html")
+    status_msg = await message.reply_text("🔍 <i>Extracting video information... Please wait.</i>", parse_mode=ParseMode.HTML)
     task_id = f"{message.chat.id}_{message.id}"
 
     # Extract info via yt-dlp in executor thread
@@ -240,7 +247,7 @@ async def link_handler(client: Client, message: Message):
         f"<i>Select your preferred download quality:</i>"
     )
 
-    await status_msg.edit_text(text, reply_markup=markup, parse_mode="html")
+    await status_msg.edit_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
 
 
 # ==================== Callback Query Handler ====================
@@ -263,7 +270,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
 
         await callback.answer("Task Cancelled!", show_alert=True)
         try:
-            await callback.message.edit_text("❌ <b>Task was cancelled by user.</b>", parse_mode="html")
+            await callback.message.edit_text("❌ <b>Task was cancelled by user.</b>", parse_mode=ParseMode.HTML)
         except Exception:
             pass
         return
@@ -288,7 +295,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
         duration = task.get("duration", 0)
 
         await callback.answer("Starting download...")
-        await callback.message.edit_text("⏳ <i>Starting video download... Please wait.</i>", parse_mode="html")
+        await callback.message.edit_text("⏳ <i>Starting video download... Please wait.</i>", parse_mode=ParseMode.HTML)
 
         # Prepare yt-dlp output template
         timestamp = int(time.time())
@@ -343,7 +350,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                 active_tasks.pop(task_id, None)
                 return
             logger.error(f"Download error: {e}")
-            await callback.message.edit_text(f"❌ <b>Download Failed:</b> {str(e)[:200]}", parse_mode="html")
+            await callback.message.edit_text(f"❌ <b>Download Failed:</b> {str(e)[:200]}", parse_mode=ParseMode.HTML)
             active_tasks.pop(task_id, None)
             return
 
@@ -358,7 +365,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                 downloaded_file = matching_files[0]
                 task["file_path"] = downloaded_file
             else:
-                await callback.message.edit_text("❌ Downloaded file not found.", parse_mode="html")
+                await callback.message.edit_text("❌ Downloaded file not found.", parse_mode=ParseMode.HTML)
                 active_tasks.pop(task_id, None)
                 return
 
@@ -376,7 +383,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
         last_update_time = [0]
         cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Task", callback_data=f"cancel|{task_id}")]])
 
-        await callback.message.edit_text("🚀 <i>Starting upload to Telegram...</i>", reply_markup=cancel_btn, parse_mode="html")
+        await callback.message.edit_text("🚀 <i>Starting upload to Telegram...</i>", reply_markup=cancel_btn, parse_mode=ParseMode.HTML)
 
         try:
             if quality_label == "audio" or downloaded_file.endswith(".mp3"):
@@ -387,7 +394,7 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                     duration=int(duration),
                     progress=progress_callback,
                     progress_args=(callback.message, task_id, "Uploading Audio", last_update_time),
-                    parse_mode="html"
+                    parse_mode=ParseMode.HTML
                 )
             else:
                 await client.send_video(
@@ -398,14 +405,14 @@ async def callback_handler(client: Client, callback: CallbackQuery):
                     supports_streaming=True,
                     progress=progress_callback,
                     progress_args=(callback.message, task_id, "Uploading Video", last_update_time),
-                    parse_mode="html"
+                    parse_mode=ParseMode.HTML
                 )
 
             await callback.message.delete()
         except Exception as e:
             if not task.get("cancelled"):
                 logger.error(f"Upload error: {e}")
-                await callback.message.edit_text(f"❌ <b>Upload Failed:</b> {str(e)[:200]}", parse_mode="html")
+                await callback.message.edit_text(f"❌ <b>Upload Failed:</b> {str(e)[:200]}", parse_mode=ParseMode.HTML)
         finally:
             # Cleanup downloaded file from disk
             if os.path.exists(downloaded_file):
